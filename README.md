@@ -110,4 +110,4 @@ Found a bug? Want to add a new script? Feel free to:
 MIT License - Feel free to use these scripts for any purpose.
 
 ---
-Created by [Your Name] - For audio professionals who value their time 🎵
+Created by Akbar Gherbal - For audio professionals who value their time 🎵
