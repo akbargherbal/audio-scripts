@@ -138,7 +138,7 @@ def detect_vocal_breaks(vocals_file, instrument_file, min_silence_duration=5, si
     return silent_regions
 
 def main():
-    base_dir = "./separated/htdemucs"
+    base_dir = "./sample_music"
     
     # Walk through all subdirectories in the base directory
     for song_dir in os.listdir(base_dir):
@@ -149,8 +149,8 @@ def main():
             continue
             
         # Construct paths for vocals and instruments files
-        vocals_file = os.path.join(song_path, "vocals.wav")
-        instrument_file = os.path.join(song_path, "instruments.wav")
+        vocals_file = os.path.join(song_path, "vocals.mp3")
+        instrument_file = os.path.join(song_path, "instruments.mp3")
         
         # Skip if either file is missing
         if not os.path.exists(vocals_file) or not os.path.exists(instrument_file):

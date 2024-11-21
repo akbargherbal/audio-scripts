@@ -128,6 +128,14 @@ def parse_arguments():
         help=f"Device to use (cpu, cuda, mps) (default: {default_device})",
     )
 
+    # Add batch size parameter
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Number of files to process simultaneously on GPU (default: 6)",
+    )
+
     return parser.parse_args()
 
 
@@ -258,71 +266,80 @@ def combine_sources(sources: torch.Tensor, source_indices: list) -> torch.Tensor
     return torch.sum(sources[source_indices], dim=0)
 
 
-def process_file(input_path: pathlib.Path, model, args) -> None:
-    """Process a single audio file"""
+def process_batch(batch_paths: list, model, args) -> list:
+    """Process a batch of audio files simultaneously"""
     try:
-        logging.info(f"Processing file: {input_path}")
+        # Read and prepare all files in the batch
+        wavs = []
+        for path in batch_paths:
+            wav = read_audio(path, model.samplerate)
+            wav = torch.from_numpy(wav)
+            wav = wav.t()
+            wav = wav.unsqueeze(0)
+            wavs.append(wav)
 
-        # Read input audio
-        wav = read_audio(input_path, model.samplerate)
-
-        # Convert to tensor
-        wav = torch.from_numpy(wav)
-        wav = wav.t()
-        wav = wav.unsqueeze(0)
-
-        # Separate audio
-        ref = wav.mean(1)
-        wav = (wav - ref.mean()) / ref.std()
+        # Stack all audio files into a single batch tensor
+        wav_batch = torch.cat(wavs, dim=0)
+        
+        # Normalize batch
+        ref = wav_batch.mean(1)
+        wav_batch = (wav_batch - ref.mean()) / ref.std()
 
         segment = int(args.segment * model.samplerate)
 
-        sources = apply_model(
+        # Process the entire batch at once
+        sources_batch = apply_model(
             model,
-            wav,
+            wav_batch,
             shifts=args.shifts,
             split=segment,
             overlap=args.overlap,
-            progress=False,  # Disable internal progress bar
+            progress=False,
             device=args.device,
-        )[0]
+        )
 
-        sources = sources * ref.std() + ref.mean()
-
-        # Define source mappings
+        results = []
         source_map = {name: idx for idx, name in enumerate(model.sources)}
 
-        if args.mode == "basic":
-            # Basic mode: vocals and instruments
-            vocals = sources[source_map["vocals"]]
-            non_vocal_indices = [
-                idx for idx, name in enumerate(model.sources) if name != "vocals"
-            ]
-            instruments = combine_sources(sources, non_vocal_indices)
-            output_stems = {"vocals": vocals, "instruments": instruments}
-        else:
-            # Full mode: all stems
-            output_stems = {
-                source_name: sources[idx]
-                for idx, source_name in enumerate(model.sources)
-            }
+        # Process each result in the batch
+        for batch_idx, (sources, ref) in enumerate(zip(sources_batch, ref)):
+            sources = sources * ref.std() + ref.mean()
 
-        # Save stems
-        for stem_name, source in output_stems.items():
-            source = source.cpu().numpy()
+            if args.mode == "basic":
+                # Basic mode: vocals and instruments
+                vocals = sources[source_map["vocals"]]
+                non_vocal_indices = [
+                    idx for idx, name in enumerate(model.sources) if name != "vocals"
+                ]
+                instruments = combine_sources(sources, non_vocal_indices)
+                output_stems = {"vocals": vocals, "instruments": instruments}
+            else:
+                # Full mode: all stems
+                output_stems = {
+                    source_name: sources[idx]
+                    for idx, source_name in enumerate(model.sources)
+                }
 
-            output_path = str(args.output).format(
-                model=args.model, track=input_path.stem, stem=stem_name, ext=args.format
-            )
-            save_audio(
-                pathlib.Path(output_path), source.T, model.samplerate, args.format
-            )
+            # Save stems
+            for stem_name, source in output_stems.items():
+                source = source.cpu().numpy()
+                output_path = str(args.output).format(
+                    model=args.model,
+                    track=batch_paths[batch_idx].stem,
+                    stem=stem_name,
+                    ext=args.format,
+                )
+                save_audio(
+                    pathlib.Path(output_path), source.T, model.samplerate, args.format
+                )
 
-        return True
+            results.append(True)
+
+        return results
 
     except Exception as e:
-        logging.error(f"Error processing {input_path}: {str(e)}")
-        return False
+        logging.error(f"Error processing batch: {str(e)}")
+        return [False] * len(batch_paths)
 
 
 def main():
@@ -350,24 +367,16 @@ def main():
         successful = 0
         failed = 0
 
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = [
-                executor.submit(process_file, file, model, args) for file in audio_files
-            ]
+        # Determine batch size based on device
+        batch_size = args.batch_size if args.device == "cuda" else 1
 
-            for file, future in tqdm(
-                zip(audio_files, futures),
-                total=len(audio_files),
-                desc="Processing files",
-            ):
-                try:
-                    if future.result():
-                        successful += 1
-                    else:
-                        failed += 1
-                except Exception as e:
-                    logging.error(f"Failed to process {file}: {str(e)}")
-                    failed += 1
+        # Process files in batches
+        for i in tqdm(range(0, len(audio_files), batch_size), desc="Processing batches"):
+            batch_paths = audio_files[i:i + batch_size]
+            results = process_batch(batch_paths, model, args)
+            
+            successful += sum(results)
+            failed += len(results) - sum(results)
 
         logging.info(f"Processing completed: {successful} successful, {failed} failed")
 
